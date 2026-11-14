@@ -17,7 +17,7 @@ export async function onRequestPost(context) {
       }
     }
 
-    // 2. 提取图片或文件信息并精准识别 MIME 类型
+    // 2. 提取图片或文件信息并精准识别 MIME 类型与字节大小
     let fileId = null;
     let fileExt = "jpg";
     let fileName = `tg_${Date.now()}.jpg`;
@@ -77,7 +77,7 @@ export async function onRequestPost(context) {
 
     if (!fileId) {
       if (message.text === "/start") {
-        await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, "✅ 图床机器人已连接！直接发送图片即可生成支持浏览器在线预览的直链。");
+        await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, "✅ 图床机器人已连接！直接发送图片即可生成支持预览与文件大小显示的直链。");
       }
       return new Response("OK", { status: 200 });
     }
@@ -99,26 +99,36 @@ export async function onRequestPost(context) {
       return new Response("OK", { status: 200 });
     }
 
-    // 4. 获取转发后的真实 file_id
+    // 4. 获取转发后的真实 file_id 与二次确认 file_size
     const savedMsg = forwardData.result;
     let targetFileId = fileId;
     if (savedMsg.photo && savedMsg.photo.length > 0) {
-      targetFileId = savedMsg.photo[savedMsg.photo.length - 1].file_id;
+      const p = savedMsg.photo[savedMsg.photo.length - 1];
+      targetFileId = p.file_id;
+      if (!fileSize && p.file_size) fileSize = p.file_size;
     } else if (savedMsg.document) {
       targetFileId = savedMsg.document.file_id;
+      if (!fileSize && savedMsg.document.file_size) fileSize = savedMsg.document.file_size;
     } else if (savedMsg.video) {
       targetFileId = savedMsg.video.file_id;
+      if (!fileSize && savedMsg.video.file_size) fileSize = savedMsg.video.file_size;
     } else if (savedMsg.animation) {
       targetFileId = savedMsg.animation.file_id;
+      if (!fileSize && savedMsg.animation.file_size) fileSize = savedMsg.animation.file_size;
     } else if (savedMsg.sticker) {
       targetFileId = savedMsg.sticker.file_id;
+      if (!fileSize && savedMsg.sticker.file_size) fileSize = savedMsg.sticker.file_size;
     }
 
     const fileKey = `${targetFileId}.${fileExt}`;
     const originUrl = new URL(request.url).origin;
     const imageUrl = `${originUrl}/file/${fileKey}`;
 
-    // 关键修复：补齐 FileType / mimeType / ContentType 字段，让 /file/ 路由输出正确的预览响应头
+    // 计算 MB 大小（字符串格式，保底 0.01 防止被前端当成 0 隐藏）
+    const sizeInMB = fileSize > 0
+      ? Math.max(0.01, Number((fileSize / 1024 / 1024).toFixed(2))).toFixed(2)
+      : "0.01";
+
     const metadata = {
       TimeStamp: Date.now(),
       ListType: "None",
@@ -126,7 +136,10 @@ export async function onRequestPost(context) {
       Directory: "",
       liked: false,
       fileName: fileName,
-      fileSize: Number((fileSize / 1024 / 1024).toFixed(2)),
+      FileName: fileName,
+      fileSize: sizeInMB,
+      FileSize: sizeInMB,
+      size: fileSize,
       FileType: mimeType,
       mimeType: mimeType,
       ContentType: mimeType,
@@ -148,8 +161,8 @@ export async function onRequestPost(context) {
     // 6. 同步更新图床后台索引
     const indexStatus = await syncToAdminIndex(context, fileKey, metadata);
 
-    // 7. 秒回直链
-    const replyText = `🎉 上传成功！\n\n🔗 **直链：**\n\`${imageUrl}\`\n\n📝 **Markdown：**\n\`![${fileName}](${imageUrl})\`\n\n🔄 **状态：** ${indexStatus} (${mimeType})`;
+    // 7. 秒回直链（同时在回复中展示识别到的文件大小）
+    const replyText = `🎉 上传成功！\n\n🔗 **直链：**\n\`${imageUrl}\`\n\n📝 **Markdown：**\n\`![${fileName}](${imageUrl})\`\n\n📊 **大小：** ${sizeInMB} MB | **类型：** ${mimeType}\n🔄 **状态：** ${indexStatus}`;
     await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, replyText);
 
     return new Response("OK", { status: 200 });
