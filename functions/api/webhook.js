@@ -9,7 +9,7 @@ export async function onRequestPost(context) {
     const chatId = message.chat.id;
     const userId = message.from ? message.from.id : null;
 
-    // 1. 权限校验：如果配置了 ALLOWED_USERS，仅允许白名单用户触发
+    // 1. 权限校验
     if (env.ALLOWED_USERS) {
       const allowedList = env.ALLOWED_USERS.split(",").map(id => id.trim());
       if (userId && !allowedList.includes(String(userId))) {
@@ -17,7 +17,7 @@ export async function onRequestPost(context) {
       }
     }
 
-    // 2. 提取图片或文件的 file_id、文件名与大小
+    // 2. 提取图片或文件信息
     let fileId = null;
     let fileExt = "jpg";
     let fileName = `tg_${Date.now()}.jpg`;
@@ -47,15 +47,15 @@ export async function onRequestPost(context) {
       fileName = message.animation.file_name || `tg_${Date.now()}.gif`;
     }
 
-    // 如果发送的是 /start 等纯文本指令，返回提示
     if (!fileId) {
       if (message.text === "/start") {
-        await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, "✅ 图床机器人已连接！直接发送图片或文件即可生成永久外链，并自动同步至图床后台。");
+        const dbStatus = `KV(img_url): ${env.img_url ? "✅已绑定" : "❌未绑定"} | D1(DB): ${env.DB ? "✅已绑定" : "❌未绑定"}`;
+        await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, `✅ 图床机器人已连接！\n当前数据库状态：${dbStatus}`);
       }
       return new Response("OK", { status: 200 });
     }
 
-    // 3. 将图片转发到你的私有存储频道
+    // 3. 转发至存储频道
     const forwardRes = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/forwardMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -72,7 +72,7 @@ export async function onRequestPost(context) {
       return new Response("OK", { status: 200 });
     }
 
-    // 4. 提取转发后频道消息中的实际 file_id
+    // 4. 获取转发后的真实 file_id 和 message_id
     const savedMsg = forwardData.result;
     let targetFileId = fileId;
     if (savedMsg.photo && savedMsg.photo.length > 0) {
@@ -89,39 +89,63 @@ export async function onRequestPost(context) {
     const originUrl = new URL(request.url).origin;
     const imageUrl = `${originUrl}/file/${fileKey}`;
 
-    // 构造 CloudFlare-ImgBed 后台管理所需的完整元数据
+    // 构造全兼容 Metadata（覆盖新旧版本所有字段）
     const metadata = {
       TimeStamp: Date.now(),
       ListType: "None",
       Label: "None",
+      Directory: "",
       liked: false,
       fileName: fileName,
-      fileSize: (fileSize / 1024 / 1024).toFixed(2),
+      fileSize: Number((fileSize / 1024 / 1024).toFixed(2)),
+      UploadIP: "TelegramBot",
+      UploadAddress: "Telegram",
       Channel: "TelegramNew",
-      ChannelName: "Telegram Bot",
+      ChannelName: "Telegram_env",
       TgFileId: targetFileId,
       TgChatId: String(env.TG_CHAT_ID),
-      TgBotToken: String(env.TG_BOT_TOKEN)
+      TgBotToken: String(env.TG_BOT_TOKEN),
+      TgMessageId: savedMsg.message_id
     };
 
-    // 5A. 写入 KV 数据库（必须写入 metadata 参数，后台列表才能读取到）
+    let syncLog = [];
+
+    // 5A. 写入 KV 并清理可能存在的目录索引缓存
     if (env.img_url) {
-      await env.img_url.put(fileKey, "", { metadata });
+      try {
+        await env.img_url.put(fileKey, "", { metadata });
+        // 尝试清理新版 CloudFlare-ImgBed 的目录列表缓存键（如有）
+        await env.img_url.delete("manage@index");
+        await env.img_url.delete("manage@index_0");
+        syncLog.push("KV写入成功");
+      } catch (kvErr) {
+        syncLog.push(`KV报错: ${kvErr.message}`);
+      }
+    } else {
+      syncLog.push("未检测到 img_url 绑定");
     }
 
-    // 5B. 兼容 D1 数据库（如果你在 Cloudflare 绑定的是 D1 数据库 DB）
+    // 5B. 写入 D1 数据库（自动探测表结构）
     if (env.DB) {
       try {
         await env.DB.prepare(
-          "INSERT OR REPLACE INTO files (id, value, metadata) VALUES (?, ?, ?)"
+          "INSERT OR REPLACE INTO img_info (url, value, metadata) VALUES (?, ?, ?)"
         ).bind(fileKey, "", JSON.stringify(metadata)).run();
-      } catch (dbErr) {
-        console.error("D1 insert error:", dbErr);
+        syncLog.push("D1(img_info)写入成功");
+      } catch (e1) {
+        try {
+          await env.DB.prepare(
+            "INSERT OR REPLACE INTO files (id, value, metadata) VALUES (?, ?, ?)"
+          ).bind(fileKey, "", JSON.stringify(metadata)).run();
+          syncLog.push("D1(files)写入成功");
+        } catch (e2) {
+          syncLog.push(`D1报错: ${e2.message}`);
+        }
       }
     }
 
-    // 6. 回复用户生成的直链和 Markdown 格式
-    const replyText = `🎉 上传成功！\n\n**直链：**\n\`${imageUrl}\`\n\n**Markdown：**\n\`![${fileName}](${imageUrl})\``;
+    // 6. 回复结果与诊断状态
+    const replyText = `🎉 上传成功！\n\n🔗 **直链：**\n\`${imageUrl}\`\n\n📝 **Markdown：**\n\`![${fileName}](${imageUrl})\`\n\n📊 **后台同步状态：** ${syncLog.join(" | ")}`;
     await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, replyText);
 
     return new Response("OK", { status: 200 });
