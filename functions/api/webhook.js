@@ -17,7 +17,7 @@ export async function onRequestPost(context) {
       }
     }
 
-    // 2. 提取图片或文件信息
+    // 2. 提取图片或文件信息（不下载文件本身，零内存占用）
     let fileId = null;
     let fileExt = "jpg";
     let fileName = `tg_${Date.now()}.jpg`;
@@ -49,13 +49,12 @@ export async function onRequestPost(context) {
 
     if (!fileId) {
       if (message.text === "/start") {
-        const dbStatus = `KV(img_url): ${env.img_url ? "✅已绑定" : "❌未绑定"} | D1(DB): ${env.DB ? "✅已绑定" : "❌未绑定"}`;
-        await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, `✅ 图床机器人已连接！\n当前数据库状态：${dbStatus}`);
+        await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, "✅ 图床机器人已连接（极速转发模式）！直接发送图片即可秒回外链。");
       }
       return new Response("OK", { status: 200 });
     }
 
-    // 3. 转发至存储频道
+    // 3. 极速转发至存储频道
     const forwardRes = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/forwardMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -72,7 +71,7 @@ export async function onRequestPost(context) {
       return new Response("OK", { status: 200 });
     }
 
-    // 4. 获取转发后的真实 file_id 和 message_id
+    // 4. 获取转发后的真实 file_id
     const savedMsg = forwardData.result;
     let targetFileId = fileId;
     if (savedMsg.photo && savedMsg.photo.length > 0) {
@@ -89,7 +88,6 @@ export async function onRequestPost(context) {
     const originUrl = new URL(request.url).origin;
     const imageUrl = `${originUrl}/file/${fileKey}`;
 
-    // 构造全兼容 Metadata（覆盖新旧版本所有字段）
     const metadata = {
       TimeStamp: Date.now(),
       ListType: "None",
@@ -108,44 +106,24 @@ export async function onRequestPost(context) {
       TgMessageId: savedMsg.message_id
     };
 
-    let syncLog = [];
-
-    // 5A. 写入 KV 并清理可能存在的目录索引缓存
+    // 5. 写入 KV 单条记录
     if (env.img_url) {
-      try {
-        await env.img_url.put(fileKey, "", { metadata });
-        // 尝试清理新版 CloudFlare-ImgBed 的目录列表缓存键（如有）
-        await env.img_url.delete("manage@index");
-        await env.img_url.delete("manage@index_0");
-        syncLog.push("KV写入成功");
-      } catch (kvErr) {
-        syncLog.push(`KV报错: ${kvErr.message}`);
-      }
-    } else {
-      syncLog.push("未检测到 img_url 绑定");
+      await env.img_url.put(fileKey, "", { metadata });
     }
 
-    // 5B. 写入 D1 数据库（自动探测表结构）
-    if (env.DB) {
-      try {
-        await env.DB.prepare(
-          "INSERT OR REPLACE INTO img_info (url, value, metadata) VALUES (?, ?, ?)"
-        ).bind(fileKey, "", JSON.stringify(metadata)).run();
-        syncLog.push("D1(img_info)写入成功");
-      } catch (e1) {
-        try {
-          await env.DB.prepare(
-            "INSERT OR REPLACE INTO files (id, value, metadata) VALUES (?, ?, ?)"
-          ).bind(fileKey, "", JSON.stringify(metadata)).run();
-          syncLog.push("D1(files)写入成功");
-        } catch (e2) {
-          syncLog.push(`D1报错: ${e2.message}`);
-        }
+    // 6. 自动携带管理员凭证触发后台索引重建（无需手动点按钮）
+    try {
+      const headers = {};
+      if (env.BASIC_USER && env.BASIC_PASS) {
+        // 使用 TextEncoder 兼容包含特殊字符的密码
+        const authStr = `${env.BASIC_USER}:${env.BASIC_PASS}`;
+        headers["Authorization"] = `Basic ${btoa(unescape(encodeURIComponent(authStr)))}`;
       }
-    }
+      await fetch(`${originUrl}/api/manage/list?action=rebuild`, { headers });
+    } catch (e) {}
 
-    // 6. 回复结果与诊断状态
-    const replyText = `🎉 上传成功！\n\n🔗 **直链：**\n\`${imageUrl}\`\n\n📝 **Markdown：**\n\`![${fileName}](${imageUrl})\`\n\n📊 **后台同步状态：** ${syncLog.join(" | ")}`;
+    // 7. 秒回直链
+    const replyText = `🎉 上传成功！\n\n🔗 **直链：**\n\`${imageUrl}\`\n\n📝 **Markdown：**\n\`![${fileName}](${imageUrl})\``;
     await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, replyText);
 
     return new Response("OK", { status: 200 });
@@ -155,7 +133,7 @@ export async function onRequestPost(context) {
 }
 
 export async function onRequestGet() {
-  return new Response("✅ Webhook 接口已正常上线！请直接在 Telegram 私聊机器人发送图片测试。", {
+  return new Response("✅ Webhook 接口已正常上线！", {
     status: 200,
     headers: { "Content-Type": "text/plain; charset=utf-8" }
   });
