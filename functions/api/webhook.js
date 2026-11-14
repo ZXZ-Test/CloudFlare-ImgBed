@@ -17,7 +17,21 @@ export async function onRequestPost(context) {
       }
     }
 
-    // 2. 提取图片或文件信息并精准识别 MIME 类型与字节大小
+    // 2. 解析目标存储文件夹（支持环境变量 TG_UPLOAD_FOLDER，也支持发图时附带 #目录名 动态覆盖）
+    let rawFolder = env.TG_UPLOAD_FOLDER || "";
+    const caption = (message.caption || "").trim();
+    if (caption.startsWith("#") || caption.startsWith("/dir ")) {
+      rawFolder = caption.replace(/^(\/dir\s+|#)/, "").trim();
+    }
+
+    // 格式化目录：去除首尾多余斜杠和非法字符，非空时统一以 "/" 结尾（如 "telegram/"）
+    const cleanFolder = rawFolder
+      .replace(/\\/g, "/")
+      .replace(/^\/+|\/+$/g, "")
+      .replace(/\.\./g, "");
+    const uploadDir = cleanFolder ? `${cleanFolder}/` : "";
+
+    // 3. 提取图片或文件信息并精准识别 MIME 类型与字节大小
     let fileId = null;
     let fileExt = "jpg";
     let fileName = `tg_${Date.now()}.jpg`;
@@ -77,12 +91,17 @@ export async function onRequestPost(context) {
 
     if (!fileId) {
       if (message.text === "/start") {
-        await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, "✅ 图床机器人已连接！直接发送图片即可生成支持预览与文件大小显示的直链。");
+        const currentDirInfo = uploadDir ? `\`/${uploadDir}\`` : "`根目录 /`";
+        await sendTelegramMessage(
+          env.TG_BOT_TOKEN,
+          chatId,
+          `✅ 图床机器人已连接！\n📁 **当前默认存储目录：** ${currentDirInfo}\n💡 **小贴士：** 发图时在说明文字里写 \`#目录名\`（如 \`#wallpaper\`）可临时存入指定文件夹。`
+        );
       }
       return new Response("OK", { status: 200 });
     }
 
-    // 3. 极速转发至存储频道
+    // 4. 极速转发至存储频道
     const forwardRes = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/forwardMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -99,7 +118,7 @@ export async function onRequestPost(context) {
       return new Response("OK", { status: 200 });
     }
 
-    // 4. 获取转发后的真实 file_id 与二次确认 file_size
+    // 5. 获取转发后的真实 file_id 与二次确认 file_size
     const savedMsg = forwardData.result;
     let targetFileId = fileId;
     if (savedMsg.photo && savedMsg.photo.length > 0) {
@@ -120,11 +139,13 @@ export async function onRequestPost(context) {
       if (!fileSize && savedMsg.sticker.file_size) fileSize = savedMsg.sticker.file_size;
     }
 
-    const fileKey = `${targetFileId}.${fileExt}`;
+    // 关键修改：将文件夹路径拼接到 fileKey 前面（如 "telegram/AgACAgU...jpg"）
+    const fileKey = `${uploadDir}${targetFileId}.${fileExt}`;
     const originUrl = new URL(request.url).origin;
-    const imageUrl = `${originUrl}/file/${fileKey}`;
+    // 对路径中的中文或特殊字符做 URL 编码，保留 "/" 分隔符
+    const encodedKey = fileKey.split("/").map(encodeURIComponent).join("/");
+    const imageUrl = `${originUrl}/file/${encodedKey}`;
 
-    // 计算 MB 大小（字符串格式，保底 0.01 防止被前端当成 0 隐藏）
     const sizeInMB = fileSize > 0
       ? Math.max(0.01, Number((fileSize / 1024 / 1024).toFixed(2))).toFixed(2)
       : "0.01";
@@ -133,7 +154,7 @@ export async function onRequestPost(context) {
       TimeStamp: Date.now(),
       ListType: "None",
       Label: "None",
-      Directory: "",
+      Directory: uploadDir, // 关键修改：同步写入 Directory 字段供后台文件夹视图归类
       liked: false,
       fileName: fileName,
       FileName: fileName,
@@ -153,16 +174,17 @@ export async function onRequestPost(context) {
       TgMessageId: savedMsg.message_id
     };
 
-    // 5. 写入 KV 单条记录
+    // 6. 写入 KV 单条记录
     if (env.img_url) {
       await env.img_url.put(fileKey, "", { metadata });
     }
 
-    // 6. 同步更新图床后台索引
+    // 7. 同步更新图床后台索引
     const indexStatus = await syncToAdminIndex(context, fileKey, metadata);
 
-    // 7. 秒回直链（同时在回复中展示识别到的文件大小）
-    const replyText = `🎉 上传成功！\n\n🔗 **直链：**\n\`${imageUrl}\`\n\n📝 **Markdown：**\n\`![${fileName}](${imageUrl})\`\n\n📊 **大小：** ${sizeInMB} MB | **类型：** ${mimeType}\n🔄 **状态：** ${indexStatus}`;
+    // 8. 秒回直链（展示存入的文件夹路径）
+    const folderDisplay = uploadDir ? `/${uploadDir}` : "根目录 /";
+    const replyText = `🎉 上传成功！\n\n🔗 **直链：**\n\`${imageUrl}\`\n\n📝 **Markdown：**\n\`![${fileName}](${imageUrl})\`\n\n📁 **目录：** \`${folderDisplay}\` | 📊 **大小：** ${sizeInMB} MB\n🔄 **状态：** ${indexStatus}`;
     await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, replyText);
 
     return new Response("OK", { status: 200 });
