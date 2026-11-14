@@ -17,39 +17,67 @@ export async function onRequestPost(context) {
       }
     }
 
-    // 2. 提取图片或文件信息（零内存占用）
+    // 2. 提取图片或文件信息并精准识别 MIME 类型
     let fileId = null;
     let fileExt = "jpg";
     let fileName = `tg_${Date.now()}.jpg`;
     let fileSize = 0;
+    let mimeType = "image/jpeg";
+
+    const mimeMap = {
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      png: "image/png",
+      gif: "image/gif",
+      webp: "image/webp",
+      svg: "image/svg+xml",
+      bmp: "image/bmp",
+      ico: "image/x-icon",
+      mp4: "video/mp4",
+      webm: "video/webm",
+      mp3: "audio/mpeg",
+      wav: "audio/wav",
+      pdf: "application/pdf"
+    };
 
     if (message.photo && message.photo.length > 0) {
       const largestPhoto = message.photo[message.photo.length - 1];
       fileId = largestPhoto.file_id;
       fileSize = largestPhoto.file_size || 0;
+      fileExt = "jpg";
       fileName = `tg_${Date.now()}.jpg`;
+      mimeType = "image/jpeg";
     } else if (message.document) {
       fileId = message.document.file_id;
       fileSize = message.document.file_size || 0;
-      fileName = message.document.file_name || `tg_${Date.now()}`;
+      fileName = message.document.file_name || `tg_${Date.now()}.jpg`;
       if (fileName.includes(".")) {
         fileExt = fileName.split(".").pop().toLowerCase();
       }
+      mimeType = message.document.mime_type || mimeMap[fileExt] || "image/jpeg";
     } else if (message.video) {
       fileId = message.video.file_id;
       fileSize = message.video.file_size || 0;
       fileExt = "mp4";
       fileName = message.video.file_name || `tg_${Date.now()}.mp4`;
+      mimeType = message.video.mime_type || "video/mp4";
     } else if (message.animation) {
       fileId = message.animation.file_id;
       fileSize = message.animation.file_size || 0;
       fileExt = "gif";
       fileName = message.animation.file_name || `tg_${Date.now()}.gif`;
+      mimeType = message.animation.mime_type || "image/gif";
+    } else if (message.sticker) {
+      fileId = message.sticker.file_id;
+      fileSize = message.sticker.file_size || 0;
+      fileExt = message.sticker.is_animated ? "tgs" : (message.sticker.is_video ? "webm" : "webp");
+      fileName = `sticker_${Date.now()}.${fileExt}`;
+      mimeType = mimeMap[fileExt] || "image/webp";
     }
 
     if (!fileId) {
       if (message.text === "/start") {
-        await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, "✅ 图床机器人已连接（原生索引直写模式）！直接发送图片即可秒回外链并实时同步后台。");
+        await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, "✅ 图床机器人已连接！直接发送图片即可生成支持浏览器在线预览的直链。");
       }
       return new Response("OK", { status: 200 });
     }
@@ -82,12 +110,15 @@ export async function onRequestPost(context) {
       targetFileId = savedMsg.video.file_id;
     } else if (savedMsg.animation) {
       targetFileId = savedMsg.animation.file_id;
+    } else if (savedMsg.sticker) {
+      targetFileId = savedMsg.sticker.file_id;
     }
 
     const fileKey = `${targetFileId}.${fileExt}`;
     const originUrl = new URL(request.url).origin;
     const imageUrl = `${originUrl}/file/${fileKey}`;
 
+    // 关键修复：补齐 FileType / mimeType / ContentType 字段，让 /file/ 路由输出正确的预览响应头
     const metadata = {
       TimeStamp: Date.now(),
       ListType: "None",
@@ -96,6 +127,9 @@ export async function onRequestPost(context) {
       liked: false,
       fileName: fileName,
       fileSize: Number((fileSize / 1024 / 1024).toFixed(2)),
+      FileType: mimeType,
+      mimeType: mimeType,
+      ContentType: mimeType,
       UploadIP: "TelegramBot",
       UploadAddress: "Telegram",
       Channel: "TelegramNew",
@@ -111,11 +145,11 @@ export async function onRequestPost(context) {
       await env.img_url.put(fileKey, "", { metadata });
     }
 
-    // 6. 核心步骤：直接同步更新图床后台索引（无需手动点重建按钮）
+    // 6. 同步更新图床后台索引
     const indexStatus = await syncToAdminIndex(context, fileKey, metadata);
 
     // 7. 秒回直链
-    const replyText = `🎉 上传成功！\n\n🔗 **直链：**\n\`${imageUrl}\`\n\n📝 **Markdown：**\n\`![${fileName}](${imageUrl})\`\n\n🔄 **索引状态：** ${indexStatus}`;
+    const replyText = `🎉 上传成功！\n\n🔗 **直链：**\n\`${imageUrl}\`\n\n📝 **Markdown：**\n\`![${fileName}](${imageUrl})\`\n\n🔄 **状态：** ${indexStatus} (${mimeType})`;
     await sendTelegramMessage(env.TG_BOT_TOKEN, chatId, replyText);
 
     return new Response("OK", { status: 200 });
@@ -124,11 +158,9 @@ export async function onRequestPost(context) {
   }
 }
 
-// 内部索引同步函数：优先调用项目原生 indexManager，兜底直接更新 KV 中的索引键
 async function syncToAdminIndex(context, fileKey, metadata) {
   const { env } = context;
 
-  // 方式 A：直接调用 CloudFlare-ImgBed 内置的 indexManager 工具函数
   try {
     const indexManager = await import("../utils/indexManager.js");
     if (indexManager.addFileToIndex) {
@@ -139,14 +171,10 @@ async function syncToAdminIndex(context, fileKey, metadata) {
       await indexManager.rebuildIndex(context);
       return "已通过原生 rebuildIndex 重建入库";
     }
-  } catch (e) {
-    // 如果项目目录结构不同，自动降级到方式 B
-  }
+  } catch (e) {}
 
-  // 方式 B：直接读取并更新 KV 里的 manage@index / manage@index_0
   if (env.img_url) {
     try {
-      // 检查是否存在分片索引或主索引
       const indexRaw = await env.img_url.get("manage@index_0") || await env.img_url.get("manage@index");
       if (indexRaw) {
         const parsed = JSON.parse(indexRaw);
@@ -164,7 +192,6 @@ async function syncToAdminIndex(context, fileKey, metadata) {
         }
       }
 
-      // 若使用的是原子操作队列（manage@index@operation_*），写入一条新增操作指令
       const opId = `manage@index@operation_${Date.now()}`;
       await env.img_url.put(opId, JSON.stringify({
         type: "add",
