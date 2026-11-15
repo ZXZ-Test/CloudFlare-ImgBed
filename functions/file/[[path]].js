@@ -201,10 +201,10 @@ async function serveFileContent(context, db, imgRecord, fileId, encodedFileName,
                 return await transformImageResponse(context, response);
             }
 
-            // 后台省流判断：若请求来自管理后台预览（?from=admin 或 Referer 含 /admin），优先使用 20KB 小图 ID
+            // 后台省流判断：若请求来自管理后台预览（?from=admin 或 Referer 含 /dashboard），优先使用 20KB 小图 ID
             const isFromAdmin = Boolean(
                 context.fileAccess?.isAdminPreview ||
-                (context.Referer && context.Referer.includes('/admin'))
+                (context.Referer && context.Referer.includes('/dashboard'))
             );
             TgFileID = (isFromAdmin && imgRecord.metadata?.TgThumbFileId)
                 ? imgRecord.metadata.TgThumbFileId
