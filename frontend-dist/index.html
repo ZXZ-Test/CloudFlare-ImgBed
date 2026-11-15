@@ -15,3 +15,87 @@
       window.__siteEntryBootstrap = { config: cached.userConfig, configReady };
     })();</script><style>html.entry-loading { background: #f5f5f7; }
     html.entry-loading.dark { background: #0f0f0f; color-scheme: dark; }</style><link rel="preload" href="/entry/entry-loader.c76da827.js" as="script"><link rel="icon" href="/static/media/logo.png"><link rel="apple-touch-icon" href="/static/media/logo.png"><link rel="mask-icon" href="/static/media/logo.png" color="#f4b400"><link rel="preload" href="/fonts/Pacifico-Regular.dc63ac94.woff2" as="font" type="font/woff2" crossorigin><meta name="description" content="Sanyue ImgHub - A modern file hosting platform"><meta name="keywords" content="Sanyue, ImgHub, file hosting, image hosting, cloud storage"><meta name="author" content="SanyueQi"><title>Sanyue ImgHub</title><link rel="stylesheet" href="/entry/entry-loader.f41470d3.css"><link rel="stylesheet" href="/css/chunk-vendors.c8a4c1c7.css"><link rel="stylesheet" href="/css/app.7127532f.css"><script data-cfasync="false" defer="defer" src="/js/chunk-vendors.afbfd4cf.js"></script><script data-cfasync="false" defer="defer" src="/js/app.b6b1d908.js"></script></head><body><noscript><style>#entry-loader { display: none; }</style><strong>We're sorry but sanyue_imghub doesn't work properly without JavaScript enabled. Please enable it to continue.</strong></noscript><div id="entry-loader" role="status" aria-live="polite" aria-label="Loading"><div class="entry-loader-content"><div class="entry-loader-name" aria-hidden="true"></div><div class="entry-loader-progress" aria-hidden="true"><div class="entry-loader-duck-travel"><div class="entry-loader-duck"><svg class="entry-duck-head" viewBox="0 0 56 48" fill="none"><path d="M25 9Q21 2 26 3Q29 3 29 8M29 8Q34 2 36 6" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><ellipse cx="28" cy="26" rx="22" ry="19" fill="currentColor"/><path d="M15 17Q18 12 24 12" stroke="#fff" stroke-width="3" stroke-linecap="round" opacity="0.22"/><ellipse cx="19.5" cy="25" rx="2" ry="2.7" fill="var(--entry-duck-eye)"/><ellipse cx="36.5" cy="25" rx="2" ry="2.7" fill="var(--entry-duck-eye)"/><g fill="#fff" opacity="0.9"><circle cx="19" cy="24" r="0.7"/><circle cx="36" cy="24" r="0.7"/></g><g fill="var(--entry-duck-cheek)" opacity="0.65"><ellipse cx="14.5" cy="31" rx="3.8" ry="2.4"/><ellipse cx="41.5" cy="31" rx="3.8" ry="2.4"/></g><ellipse cx="28" cy="33" rx="7.5" ry="4.3" fill="var(--entry-duck-beak)"/><path d="M23 33Q28 35 33 33" stroke="var(--entry-duck-mouth)" stroke-width="1.2" stroke-linecap="round"/></svg> <svg class="entry-duck-ripples" viewBox="0 0 56 48" fill="none" stroke="var(--entry-accent)" stroke-width="1" stroke-linecap="round"><path d="M5 46H12M22 47H34M44 46H51"/></svg></div><div class="entry-loader-bar"></div></div><div class="entry-loader-track"></div></div></div></div><div id="app" inert></div><script data-cfasync="false" src="/entry/entry-loader.c76da827.js"></script></body></html>
+    <script>
+(function() {
+  if (!location.pathname.startsWith('/admin')) return;
+
+  // 创建右下角“导出表格”悬浮按钮
+  const exportBtn = document.createElement('button');
+  exportBtn.textContent = '📊 导出表格 (CSV)';
+  exportBtn.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:9999;padding:10px 16px;background:#10b981;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:bold;box-shadow:0 4px 12px rgba(0,0,0,0.15);cursor:pointer;transition:opacity 0.2s;';
+  exportBtn.onmouseenter = () => exportBtn.style.opacity = '0.9';
+  exportBtn.onmouseleave = () => exportBtn.style.opacity = '1';
+
+  exportBtn.onclick = async () => {
+    const oldText = exportBtn.textContent;
+    exportBtn.textContent = '⏳ 正在拉取全站数据...';
+    exportBtn.disabled = true;
+
+    try {
+      // 调用图床原生管理列表接口获取全部文件（自动携带当前登录态）
+      const res = await fetch('/api/manage/list?count=-1', { credentials: 'include' });
+      if (!res.ok) throw new Error('接口请求失败，请确认已登录后台');
+      const data = await res.json();
+      const files = Array.isArray(data) ? data : (data.files || []);
+
+      if (files.length === 0) {
+        alert('当前图床暂无文件记录');
+        return;
+      }
+
+      const headers = ['文件名', '存储目录', '大小(MB)', 'MIME类型', '上传渠道', '上传时间', '原图直链', '独立缩略图直链', 'Markdown代码'];
+      const rows = [headers.join(',')];
+
+      for (const item of files) {
+        const key = item.id || item.name || '';
+        if (!key || key.startsWith('thumb/')) continue;
+
+        const m = item.metadata || {};
+        if (m.isHiddenThumb) continue;
+
+        const fileName = (m.FileName || m.fileName || key).replace(/"/g, '""');
+        const dir = m.Directory || (key.includes('/') ? key.substring(0, key.lastIndexOf('/') + 1) : '/');
+        const size = m.FileSize || m.fileSize || '0.01';
+        const type = m.FileType || m.mimeType || 'unknown';
+        const channel = m.Channel || 'TelegramNew';
+        const timeStr = m.TimeStamp ? new Date(Number(m.TimeStamp)).toLocaleString('zh-CN') : '';
+
+        const encodedKey = key.split('/').map(encodeURIComponent).join('/');
+        const origUrl = `${location.origin}/file/${encodedKey}`;
+        const thumbUrl = m.thumbUrl || (m.thumbKey ? `${location.origin}/file/${m.thumbKey}` : '');
+        const md = `![${fileName}](${origUrl})`.replace(/"/g, '""');
+
+        rows.push([
+          `"${fileName}"`,
+          `"${dir}"`,
+          `"${size}"`,
+          `"${type}"`,
+          `"${channel}"`,
+          `"${timeStr}"`,
+          `"${origUrl}"`,
+          `"${thumbUrl}"`,
+          `"${md}"`
+        ].join(','));
+      }
+
+      // 添加 UTF-8 BOM 头防止 Excel 打开中文乱码
+      const blob = new Blob(['\uFEFF' + rows.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+      const downloadUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = `imgbed_export_${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(downloadUrl);
+    } catch (err) {
+      alert('导出失败：' + err.message);
+    } finally {
+      exportBtn.textContent = oldText;
+      exportBtn.disabled = false;
+    }
+  };
+
+  document.body.appendChild(exportBtn);
+})();
+</script>
