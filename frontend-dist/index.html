@@ -20,32 +20,7 @@
   const isManagePage = () =>
     location.pathname.startsWith('/dashboard');
 
-  // ==========================================
-  // 功能 1：为文件卡片自动注入“复制缩略图”按钮
-  // ==========================================
-  const thumbMap = new Map();
-  const origFetch = window.fetch;
-  window.fetch = async function(...args) {
-    const res = await origFetch.apply(this, args);
-    const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
-    if (url.includes('/api/manage/list')) {
-      try {
-        const clone = res.clone();
-        const data = await clone.json();
-        const list = Array.isArray(data) ? data : (data.files || []);
-        list.forEach(item => {
-          const key = item.id || item.name;
-          const tUrl = item.metadata?.thumbUrl || (item.metadata?.thumbKey ? `${location.origin}/file/${item.metadata.thumbKey}` : '');
-          if (key && tUrl) thumbMap.set(key, tUrl);
-        });
-      } catch (e) {}
-    }
-    return res;
-  };
-
-  // ==========================================
-  // 功能 2：右下角“按文件夹选择导出表格”按钮与弹窗
-  // ==========================================
+  // 创建右下角“导出表格”悬浮按钮
   const exportBtn = document.createElement('button');
   exportBtn.id = 'imgbed-floating-export-btn';
   exportBtn.textContent = '📊 导出表格 (CSV)';
@@ -53,11 +28,11 @@
   exportBtn.onmouseenter = () => exportBtn.style.transform = 'translateY(-2px)';
   exportBtn.onmouseleave = () => exportBtn.style.transform = 'translateY(0)';
 
-  // 根据当前路由动态控制按钮显示/隐藏（兼容 Vue 无刷新路由跳转）
   function syncButtonVisibility() {
     exportBtn.style.display = isManagePage() ? 'block' : 'none';
   }
 
+  // 监听 SPA 路由切换
   const origPushState = history.pushState;
   history.pushState = function(...args) {
     origPushState.apply(this, args);
@@ -70,34 +45,45 @@
   };
   window.addEventListener('popstate', syncButtonVisibility);
 
-  const observer = new MutationObserver(() => {
-    syncButtonVisibility();
-    if (!isManagePage()) return;
+  // 自动收集浏览器本地存储中的后台登录凭据（兼容多版本键名）
+  function buildAuthHeaders() {
+    const headers = {};
+    const tokenKeys = ['authCode', 'token', 'adminToken', 'Authorization', 'access_token'];
+    let foundToken = '';
 
-    document.querySelectorAll('img[src*="/file/"]').forEach(img => {
-      const card = img.closest('.file-item, .el-card, [class*="card"], [class*="item"]');
-      if (!card || card.dataset.thumbInjected) return;
+    for (const k of tokenKeys) {
+      const val = localStorage.getItem(k) || sessionStorage.getItem(k);
+      if (val && val !== 'undefined' && val !== 'null') {
+        foundToken = val.replace(/^"|"$/g, '');
+        break;
+      }
+    }
 
-      const rawPath = decodeURIComponent(new URL(img.src).pathname.replace(/^\/file\//, ''));
-      const thumbUrl = thumbMap.get(rawPath);
-      if (!thumbUrl) return;
+    // 兜底遍历 localStorage 查找包含 token/auth 的字段
+    if (!foundToken) {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && /token|auth/i.test(key)) {
+          const val = localStorage.getItem(key);
+          if (val && val.length > 6 && val.length < 512) {
+            try {
+              const parsed = JSON.parse(val);
+              foundToken = parsed?.token || parsed?.authCode || parsed?.value || '';
+            } catch {
+              foundToken = val.replace(/^"|"$/g, '');
+            }
+            if (foundToken) break;
+          }
+        }
+      }
+    }
 
-      card.dataset.thumbInjected = 'true';
-      const btn = document.createElement('button');
-      btn.textContent = '复制缩略图';
-      btn.title = thumbUrl;
-      btn.style.cssText = 'margin:4px;padding:2px 8px;font-size:12px;background:#10b981;color:#fff;border:none;border-radius:4px;cursor:pointer;z-index:10;position:relative;';
-      btn.onclick = async (e) => {
-        e.stopPropagation();
-        await navigator.clipboard.writeText(thumbUrl);
-        const old = btn.textContent;
-        btn.textContent = '已复制!';
-        setTimeout(() => btn.textContent = old, 1500);
-      };
-      card.appendChild(btn);
-    });
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
+    if (foundToken) {
+      headers['Authorization'] = foundToken.startsWith('Bearer ') ? foundToken : `Bearer ${foundToken}`;
+      headers['authCode'] = foundToken.replace(/^Bearer\s+/i, '');
+    }
+    return headers;
+  }
 
   exportBtn.onclick = async () => {
     const oldText = exportBtn.textContent;
@@ -105,10 +91,20 @@
     exportBtn.disabled = true;
 
     try {
-      const res = await origFetch('/api/manage/list?count=-1&includeSubdirFiles=true', { credentials: 'include' });
-      if (!res.ok) throw new Error('接口请求失败，请确认已登录后台');
+      const res = await fetch('/api/manage/list?count=-1&includeSubdirFiles=true', {
+        credentials: 'include',
+        headers: buildAuthHeaders()
+      });
+
+      if (res.status === 401 || res.status === 403) {
+        throw new Error('登录状态已过期，请刷新页面重新登录后台');
+      }
+      if (!res.ok) {
+        throw new Error(`接口请求失败 (${res.status})`);
+      }
+
       const data = await res.json();
-      const rawFiles = Array.isArray(data) ? data : (data.files || []);
+      const rawFiles = Array.isArray(data) ? data : (data.files || data.data || []);
 
       const validFiles = [];
       const folderStats = new Map();
@@ -127,13 +123,13 @@
       }
 
       if (validFiles.length === 0) {
-        alert('当前图床暂无有效文件记录');
+        alert('当前图床暂无有效文件记录（若刚上传过文件，请先点击后台的“刷新”按钮同步索引后再试）');
         return;
       }
 
       openFolderSelectModal(validFiles, folderStats);
     } catch (err) {
-      alert('加载失败：' + err.message);
+      alert('导出失败：' + err.message);
     } finally {
       exportBtn.textContent = oldText;
       exportBtn.disabled = false;
