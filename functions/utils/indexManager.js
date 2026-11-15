@@ -778,13 +778,13 @@ export async function rebuildIndex(context, progressCallback = null) {
             cursor = response.cursor;
 
             for (const item of response.keys) {
-                // 跳过管理相关的键
-                if (item.name.startsWith('manage@') || item.name.startsWith('chunk_')) {
+                // 跳过管理相关的键及独立随机缩略图指针
+                if (item.name.startsWith('manage@') || item.name.startsWith('chunk_') || item.name.startsWith('thumb/')) {
                     continue;
                 }
 
-                // 跳过没有元数据的文件
-                if (!item.metadata || !item.metadata.TimeStamp) {
+                // 跳过没有元数据的文件或标记为隐藏缩略图的记录
+                if (!item.metadata || !item.metadata.TimeStamp || item.metadata.isHiddenThumb) {
                     continue;
                 }
 
