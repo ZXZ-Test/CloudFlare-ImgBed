@@ -291,12 +291,13 @@ function buildUploadResponse(context, returnLink, extraFields = {}) {
 }
 
 // 从 Telegram sendFile 返回体中提取自带的小尺寸缩略图 file_id
-function extractTelegramThumbId(tgResponse) {
+function extractTelegramThumbId(tgResponse, thumbLevel = 1) {
     const msg = tgResponse?.result || tgResponse;
     if (!msg) return null;
 
     if (Array.isArray(msg.photo) && msg.photo.length > 0) {
-        return msg.photo.length > 1 ? msg.photo[1].file_id : msg.photo[0].file_id;
+        const idx = Math.min(Math.max(0, thumbLevel), msg.photo.length - 1);
+        return msg.photo[idx].file_id;
     }
     const docThumb = msg.document?.thumbnail || msg.document?.thumb;
     if (docThumb?.file_id) return docThumb.file_id;
@@ -511,7 +512,7 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
         metadata.FileSize = (fileInfo.file_size / 1024 / 1024).toFixed(2);
 
         // 提取自带小尺寸缩略图 ID，生成独立随机 thumb/ 隐藏指针（不入后台索引）
-        const thumbFileId = extractTelegramThumbId(response);
+        const thumbFileId = extractTelegramThumbId(response, parseInt(env.TG_THUMB_LEVEL || "1", 10));
         let thumbKey = "";
         let thumbUrl = "";
         if (thumbFileId) {
