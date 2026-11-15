@@ -20,6 +20,107 @@
   const isManagePage = () =>
     location.pathname.startsWith('/dashboard');
 
+  // 捕获网页原生请求 /api/manage/list 时携带的真实鉴权请求头与最新数据
+  let capturedAuthHeaders = {};
+  let cachedNativeFiles = [];
+
+  function saveCapturedHeader(key, value) {
+    if (!key || !value) return;
+    const k = key.toLowerCase();
+    if (k === 'authorization' || k === 'authcode' || k === 'x-auth-token' || k === 'token') {
+      capturedAuthHeaders[key] = value;
+    }
+  }
+
+  function extractFilesFromPayload(data) {
+    if (!data) return [];
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data.files)) return data.files;
+    if (data.data && Array.isArray(data.data.files)) return data.data.files;
+    if (Array.isArray(data.data)) return data.data;
+    return [];
+  }
+
+  // 1. 拦截 XMLHttpRequest (axios 默认使用 XHR)
+  const origXHROpen = XMLHttpRequest.prototype.open;
+  const origXHRSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+  const origXHRSend = XMLHttpRequest.prototype.send;
+
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this._reqUrl = typeof url === 'string' ? url : '';
+    return origXHROpen.apply(this, [method, url, ...rest]);
+  };
+
+  XMLHttpRequest.prototype.setRequestHeader = function(header, value) {
+    saveCapturedHeader(header, value);
+    return origXHRSetHeader.apply(this, arguments);
+  };
+
+  XMLHttpRequest.prototype.send = function(...args) {
+    if (this._reqUrl && this._reqUrl.includes('/api/manage/list')) {
+      this.addEventListener('load', function() {
+        try {
+          const json = JSON.parse(this.responseText);
+          const list = extractFilesFromPayload(json);
+          if (list.length > 0) cachedNativeFiles = list;
+        } catch (e) {}
+      });
+    }
+    return origXHRSend.apply(this, args);
+  };
+
+  // 2. 拦截 fetch 请求
+  const origFetch = window.fetch;
+  window.fetch = async function(...args) {
+    const reqUrl = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+    const initHeaders = args[1]?.headers || args[0]?.headers;
+    if (initHeaders) {
+      if (initHeaders instanceof Headers) {
+        initHeaders.forEach((v, k) => saveCapturedHeader(k, v));
+      } else if (typeof initHeaders === 'object') {
+        Object.entries(initHeaders).forEach(([k, v]) => saveCapturedHeader(k, v));
+      }
+    }
+
+    const res = await origFetch.apply(this, args);
+    if (reqUrl.includes('/api/manage/list')) {
+      try {
+        const clone = res.clone();
+        const json = await clone.json();
+        const list = extractFilesFromPayload(json);
+        if (list.length > 0) cachedNativeFiles = list;
+      } catch (e) {}
+    }
+    return res;
+  };
+
+  // 兜底从 localStorage 深层对象中提取 token/authCode
+  function getFallbackAuthHeaders() {
+    const headers = { ...capturedAuthHeaders };
+    if (Object.keys(headers).length > 0) return headers;
+
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      const raw = localStorage.getItem(k);
+      if (!raw) continue;
+      if (/token|auth/i.test(k) && raw.length < 512 && !raw.startsWith('{')) {
+        const clean = raw.replace(/^"|"$/g, '');
+        headers['Authorization'] = clean.startsWith('Bearer ') ? clean : `Bearer ${clean}`;
+        headers['authCode'] = clean.replace(/^Bearer\s+/i, '');
+      } else if (raw.startsWith('{')) {
+        try {
+          const obj = JSON.parse(raw);
+          const tk = obj.authCode || obj.token || obj.adminToken || obj.user?.token || obj.auth?.token;
+          if (tk && typeof tk === 'string') {
+            headers['Authorization'] = tk.startsWith('Bearer ') ? tk : `Bearer ${tk}`;
+            headers['authCode'] = tk.replace(/^Bearer\s+/i, '');
+          }
+        } catch (e) {}
+      }
+    }
+    return headers;
+  }
+
   // 创建右下角“导出表格”悬浮按钮
   const exportBtn = document.createElement('button');
   exportBtn.id = 'imgbed-floating-export-btn';
@@ -32,7 +133,6 @@
     exportBtn.style.display = isManagePage() ? 'block' : 'none';
   }
 
-  // 监听 SPA 路由切换
   const origPushState = history.pushState;
   history.pushState = function(...args) {
     origPushState.apply(this, args);
@@ -45,66 +145,32 @@
   };
   window.addEventListener('popstate', syncButtonVisibility);
 
-  // 自动收集浏览器本地存储中的后台登录凭据（兼容多版本键名）
-  function buildAuthHeaders() {
-    const headers = {};
-    const tokenKeys = ['authCode', 'token', 'adminToken', 'Authorization', 'access_token'];
-    let foundToken = '';
-
-    for (const k of tokenKeys) {
-      const val = localStorage.getItem(k) || sessionStorage.getItem(k);
-      if (val && val !== 'undefined' && val !== 'null') {
-        foundToken = val.replace(/^"|"$/g, '');
-        break;
-      }
-    }
-
-    // 兜底遍历 localStorage 查找包含 token/auth 的字段
-    if (!foundToken) {
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && /token|auth/i.test(key)) {
-          const val = localStorage.getItem(key);
-          if (val && val.length > 6 && val.length < 512) {
-            try {
-              const parsed = JSON.parse(val);
-              foundToken = parsed?.token || parsed?.authCode || parsed?.value || '';
-            } catch {
-              foundToken = val.replace(/^"|"$/g, '');
-            }
-            if (foundToken) break;
-          }
-        }
-      }
-    }
-
-    if (foundToken) {
-      headers['Authorization'] = foundToken.startsWith('Bearer ') ? foundToken : `Bearer ${foundToken}`;
-      headers['authCode'] = foundToken.replace(/^Bearer\s+/i, '');
-    }
-    return headers;
-  }
-
   exportBtn.onclick = async () => {
     const oldText = exportBtn.textContent;
     exportBtn.textContent = '⏳ 正在加载目录列表...';
     exportBtn.disabled = true;
 
     try {
-      const res = await fetch('/api/manage/list?count=-1&includeSubdirFiles=true', {
+      const headers = getFallbackAuthHeaders();
+      const res = await origFetch('/api/manage/list?count=-1&includeSubdirFiles=true', {
         credentials: 'include',
-        headers: buildAuthHeaders()
+        headers
       });
 
-      if (res.status === 401 || res.status === 403) {
-        throw new Error('登录状态已过期，请刷新页面重新登录后台');
-      }
-      if (!res.ok) {
-        throw new Error(`接口请求失败 (${res.status})`);
+      let rawFiles = [];
+      if (res.ok) {
+        const data = await res.json();
+        rawFiles = extractFilesFromPayload(data);
       }
 
-      const data = await res.json();
-      const rawFiles = Array.isArray(data) ? data : (data.files || data.data || []);
+      // 若全站拉取被拦截或为空，自动回退使用当前页面已成功加载的列表缓存
+      if (rawFiles.length === 0 && cachedNativeFiles.length > 0) {
+        rawFiles = cachedNativeFiles;
+      }
+
+      if (rawFiles.length === 0) {
+        throw new Error(`未获取到文件数据（HTTP ${res.status}），请先在当前页面点击一次“刷新”按钮后再试`);
+      }
 
       const validFiles = [];
       const folderStats = new Map();
@@ -123,7 +189,7 @@
       }
 
       if (validFiles.length === 0) {
-        alert('当前图床暂无有效文件记录（若刚上传过文件，请先点击后台的“刷新”按钮同步索引后再试）');
+        alert('当前目录暂无有效文件记录');
         return;
       }
 
