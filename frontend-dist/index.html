@@ -15,3 +15,237 @@
       window.__siteEntryBootstrap = { config: cached.userConfig, configReady };
     })();</script><style>html.entry-loading { background: #f5f5f7; }
     html.entry-loading.dark { background: #0f0f0f; color-scheme: dark; }</style><link rel="preload" href="/entry/entry-loader.c76da827.js" as="script"><link rel="icon" href="/static/media/logo.png"><link rel="apple-touch-icon" href="/static/media/logo.png"><link rel="mask-icon" href="/static/media/logo.png" color="#f4b400"><link rel="preload" href="/fonts/Pacifico-Regular.dc63ac94.woff2" as="font" type="font/woff2" crossorigin><meta name="description" content="Sanyue ImgHub - A modern file hosting platform"><meta name="keywords" content="Sanyue, ImgHub, file hosting, image hosting, cloud storage"><meta name="author" content="SanyueQi"><title>Sanyue ImgHub</title><link rel="stylesheet" href="/entry/entry-loader.f41470d3.css"><link rel="stylesheet" href="/css/chunk-vendors.c8a4c1c7.css"><link rel="stylesheet" href="/css/app.7127532f.css"><script data-cfasync="false" defer="defer" src="/js/chunk-vendors.afbfd4cf.js"></script><script data-cfasync="false" defer="defer" src="/js/app.b6b1d908.js"></script></head><body><noscript><style>#entry-loader { display: none; }</style><strong>We're sorry but sanyue_imghub doesn't work properly without JavaScript enabled. Please enable it to continue.</strong></noscript><div id="entry-loader" role="status" aria-live="polite" aria-label="Loading"><div class="entry-loader-content"><div class="entry-loader-name" aria-hidden="true"></div><div class="entry-loader-progress" aria-hidden="true"><div class="entry-loader-duck-travel"><div class="entry-loader-duck"><svg class="entry-duck-head" viewBox="0 0 56 48" fill="none"><path d="M25 9Q21 2 26 3Q29 3 29 8M29 8Q34 2 36 6" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><ellipse cx="28" cy="26" rx="22" ry="19" fill="currentColor"/><path d="M15 17Q18 12 24 12" stroke="#fff" stroke-width="3" stroke-linecap="round" opacity="0.22"/><ellipse cx="19.5" cy="25" rx="2" ry="2.7" fill="var(--entry-duck-eye)"/><ellipse cx="36.5" cy="25" rx="2" ry="2.7" fill="var(--entry-duck-eye)"/><g fill="#fff" opacity="0.9"><circle cx="19" cy="24" r="0.7"/><circle cx="36" cy="24" r="0.7"/></g><g fill="var(--entry-duck-cheek)" opacity="0.65"><ellipse cx="14.5" cy="31" rx="3.8" ry="2.4"/><ellipse cx="41.5" cy="31" rx="3.8" ry="2.4"/></g><ellipse cx="28" cy="33" rx="7.5" ry="4.3" fill="var(--entry-duck-beak)"/><path d="M23 33Q28 35 33 33" stroke="var(--entry-duck-mouth)" stroke-width="1.2" stroke-linecap="round"/></svg> <svg class="entry-duck-ripples" viewBox="0 0 56 48" fill="none" stroke="var(--entry-accent)" stroke-width="1" stroke-linecap="round"><path d="M5 46H12M22 47H34M44 46H51"/></svg></div><div class="entry-loader-bar"></div></div><div class="entry-loader-track"></div></div></div></div><div id="app" inert></div><script data-cfasync="false" src="/entry/entry-loader.c76da827.js"></script></body></html>
+<script>
+(function() {
+  const isManagePage = () =>
+    location.pathname.startsWith('/dashboard');
+
+  // ==========================================
+  // 功能 1：为文件卡片自动注入“复制缩略图”按钮
+  // ==========================================
+  const thumbMap = new Map();
+  const origFetch = window.fetch;
+  window.fetch = async function(...args) {
+    const res = await origFetch.apply(this, args);
+    const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+    if (url.includes('/api/manage/list')) {
+      try {
+        const clone = res.clone();
+        const data = await clone.json();
+        const list = Array.isArray(data) ? data : (data.files || []);
+        list.forEach(item => {
+          const key = item.id || item.name;
+          const tUrl = item.metadata?.thumbUrl || (item.metadata?.thumbKey ? `${location.origin}/file/${item.metadata.thumbKey}` : '');
+          if (key && tUrl) thumbMap.set(key, tUrl);
+        });
+      } catch (e) {}
+    }
+    return res;
+  };
+
+  // ==========================================
+  // 功能 2：右下角“按文件夹选择导出表格”按钮与弹窗
+  // ==========================================
+  const exportBtn = document.createElement('button');
+  exportBtn.id = 'imgbed-floating-export-btn';
+  exportBtn.textContent = '📊 导出表格 (CSV)';
+  exportBtn.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:9999;padding:10px 16px;background:#10b981;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:bold;box-shadow:0 4px 12px rgba(0,0,0,0.18);cursor:pointer;transition:transform 0.15s;display:none;';
+  exportBtn.onmouseenter = () => exportBtn.style.transform = 'translateY(-2px)';
+  exportBtn.onmouseleave = () => exportBtn.style.transform = 'translateY(0)';
+
+  // 根据当前路由动态控制按钮显示/隐藏（兼容 Vue 无刷新路由跳转）
+  function syncButtonVisibility() {
+    exportBtn.style.display = isManagePage() ? 'block' : 'none';
+  }
+
+  const origPushState = history.pushState;
+  history.pushState = function(...args) {
+    origPushState.apply(this, args);
+    syncButtonVisibility();
+  };
+  const origReplaceState = history.replaceState;
+  history.replaceState = function(...args) {
+    origReplaceState.apply(this, args);
+    syncButtonVisibility();
+  };
+  window.addEventListener('popstate', syncButtonVisibility);
+
+  const observer = new MutationObserver(() => {
+    syncButtonVisibility();
+    if (!isManagePage()) return;
+
+    document.querySelectorAll('img[src*="/file/"]').forEach(img => {
+      const card = img.closest('.file-item, .el-card, [class*="card"], [class*="item"]');
+      if (!card || card.dataset.thumbInjected) return;
+
+      const rawPath = decodeURIComponent(new URL(img.src).pathname.replace(/^\/file\//, ''));
+      const thumbUrl = thumbMap.get(rawPath);
+      if (!thumbUrl) return;
+
+      card.dataset.thumbInjected = 'true';
+      const btn = document.createElement('button');
+      btn.textContent = '复制缩略图';
+      btn.title = thumbUrl;
+      btn.style.cssText = 'margin:4px;padding:2px 8px;font-size:12px;background:#10b981;color:#fff;border:none;border-radius:4px;cursor:pointer;z-index:10;position:relative;';
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        await navigator.clipboard.writeText(thumbUrl);
+        const old = btn.textContent;
+        btn.textContent = '已复制!';
+        setTimeout(() => btn.textContent = old, 1500);
+      };
+      card.appendChild(btn);
+    });
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+
+  exportBtn.onclick = async () => {
+    const oldText = exportBtn.textContent;
+    exportBtn.textContent = '⏳ 正在加载目录列表...';
+    exportBtn.disabled = true;
+
+    try {
+      const res = await origFetch('/api/manage/list?count=-1&includeSubdirFiles=true', { credentials: 'include' });
+      if (!res.ok) throw new Error('接口请求失败，请确认已登录后台');
+      const data = await res.json();
+      const rawFiles = Array.isArray(data) ? data : (data.files || []);
+
+      const validFiles = [];
+      const folderStats = new Map();
+
+      for (const item of rawFiles) {
+        const key = item.id || item.name || '';
+        if (!key || key.startsWith('thumb/')) continue;
+        const m = item.metadata || {};
+        if (m.isHiddenThumb) continue;
+
+        let dir = m.Directory || (key.includes('/') ? key.substring(0, key.lastIndexOf('/') + 1) : '');
+        dir = dir ? (dir.endsWith('/') ? dir : dir + '/') : '/';
+
+        validFiles.push({ key, m, dir });
+        folderStats.set(dir, (folderStats.get(dir) || 0) + 1);
+      }
+
+      if (validFiles.length === 0) {
+        alert('当前图床暂无有效文件记录');
+        return;
+      }
+
+      openFolderSelectModal(validFiles, folderStats);
+    } catch (err) {
+      alert('加载失败：' + err.message);
+    } finally {
+      exportBtn.textContent = oldText;
+      exportBtn.disabled = false;
+    }
+  };
+
+  function openFolderSelectModal(validFiles, folderStats) {
+    const existing = document.getElementById('imgbed-export-modal');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'imgbed-export-modal';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center;font-family:sans-serif;';
+
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background:#fff;color:#1f2937;width:420px;max-width:90vw;border-radius:12px;padding:20px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.2);';
+
+    const sortedFolders = Array.from(folderStats.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    const checkboxesHtml = sortedFolders.map(([dir, count]) => `
+      <label style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:6px;cursor:pointer;border:1px solid #e5e7eb;margin-bottom:8px;background:#f9fafb;">
+        <span style="display:flex;align-items:center;gap:8px;font-size:14px;word-break:break-all;">
+          <input type="checkbox" class="imgbed-dir-cb" value="${dir}" checked style="width:16px;height:16px;accent-color:#10b981;">
+          <strong>${dir === '/' ? '根目录 (/)' : dir}</strong>
+        </span>
+        <span style="font-size:12px;color:#6b7280;background:#e5e7eb;padding:2px 8px;border-radius:10px;white-space:nowrap;">${count} 个文件</span>
+      </label>
+    `).join('');
+
+    modal.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h3 style="margin:0;font-size:16px;font-weight:bold;">📁 选择要导出的文件夹</h3>
+        <button id="imgbed-close-modal" style="background:none;border:none;font-size:18px;cursor:pointer;color:#6b7280;">✕</button>
+      </div>
+      <div style="display:flex;gap:12px;margin-bottom:10px;font-size:13px;">
+        <a href="javascript:void(0)" id="imgbed-select-all" style="color:#10b981;text-decoration:none;font-weight:bold;">全选</a>
+        <a href="javascript:void(0)" id="imgbed-select-none" style="color:#6b7280;text-decoration:none;">全不选</a>
+      </div>
+      <div style="max-height:280px;overflow-y:auto;padding-right:4px;margin-bottom:16px;">
+        ${checkboxesHtml}
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:10px;">
+        <button id="imgbed-cancel-btn" style="padding:8px 14px;border:1px solid #d1d5db;background:#fff;border-radius:6px;cursor:pointer;font-size:13px;">取消</button>
+        <button id="imgbed-confirm-export" style="padding:8px 16px;border:none;background:#10b981;color:#fff;border-radius:6px;cursor:pointer;font-size:13px;font-weight:bold;">确认导出 CSV</button>
+      </div>
+    `;
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const closeModal = () => overlay.remove();
+    modal.querySelector('#imgbed-close-modal').onclick = closeModal;
+    modal.querySelector('#imgbed-cancel-btn').onclick = closeModal;
+    overlay.onclick = (e) => { if (e.target === overlay) closeModal(); };
+
+    const cbs = modal.querySelectorAll('.imgbed-dir-cb');
+    modal.querySelector('#imgbed-select-all').onclick = () => cbs.forEach(cb => cb.checked = true);
+    modal.querySelector('#imgbed-select-none').onclick = () => cbs.forEach(cb => cb.checked = false);
+
+    modal.querySelector('#imgbed-confirm-export').onclick = () => {
+      const selectedDirs = new Set(Array.from(cbs).filter(cb => cb.checked).map(cb => cb.value));
+      if (selectedDirs.size === 0) {
+        alert('请至少勾选一个文件夹！');
+        return;
+      }
+
+      const targetFiles = validFiles.filter(f => selectedDirs.has(f.dir));
+      downloadCSV(targetFiles, selectedDirs.size === sortedFolders.length ? 'all' : `${selectedDirs.size}dirs`);
+      closeModal();
+    };
+  }
+
+  function downloadCSV(targetFiles, tag) {
+    const headers = ['文件名', '存储目录', '大小(MB)', 'MIME类型', '上传渠道', '上传时间', '原图直链', '独立缩略图直链', 'Markdown代码'];
+    const rows = [headers.join(',')];
+
+    for (const { key, m, dir } of targetFiles) {
+      const fileName = (m.FileName || m.fileName || key).replace(/"/g, '""');
+      const size = m.FileSize || m.fileSize || '0.01';
+      const type = m.FileType || m.mimeType || 'unknown';
+      const channel = m.Channel || 'TelegramNew';
+      const timeStr = m.TimeStamp ? new Date(Number(m.TimeStamp)).toLocaleString('zh-CN') : '';
+
+      const encodedKey = key.split('/').map(encodeURIComponent).join('/');
+      const origUrl = `${location.origin}/file/${encodedKey}`;
+      const thumbUrl = m.thumbUrl || (m.thumbKey ? `${location.origin}/file/${m.thumbKey}` : '');
+      const md = `![${fileName}](${origUrl})`.replace(/"/g, '""');
+
+      rows.push([
+        `"${fileName}"`,
+        `"${dir}"`,
+        `"${size}"`,
+        `"${type}"`,
+        `"${channel}"`,
+        `"${timeStr}"`,
+        `"${origUrl}"`,
+        `"${thumbUrl}"`,
+        `"${md}"`
+      ].join(','));
+    }
+
+    const blob = new Blob(['\uFEFF' + rows.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    const downloadUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = `imgbed_${tag}_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(downloadUrl);
+  }
+
+  document.body.appendChild(exportBtn);
+  syncButtonVisibility();
+})();
+</script>
