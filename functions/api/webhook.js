@@ -91,9 +91,11 @@ export async function onRequestPost(context) {
       mimeType = "image/jpeg";
 
       // 若存在多档分辨率，提取索引 1（约 320px 宽，15KB~30KB）作为独立缩略图
+      const thumbLevel = Math.max(0, parseInt(env.TG_THUMB_LEVEL || "1", 10));
+      const thumbIdx = Math.min(thumbLevel, message.photo.length - 1);
       if (message.photo.length > 1) {
-        thumbFileId = message.photo[1].file_id;
-        thumbSize = message.photo[1].file_size || 0;
+        thumbFileId = message.photo[thumbIdx].file_id;
+        thumbSize = message.photo[thumbIdx].file_size || 0;
       }
     } else if (message.document) {
       fileId = message.document.file_id;
@@ -189,9 +191,11 @@ export async function onRequestPost(context) {
       const p = savedMsg.photo[savedMsg.photo.length - 1];
       targetFileId = p.file_id;
       if (!fileSize && p.file_size) fileSize = p.file_size;
+      const thumbLevel = Math.max(0, parseInt(env.TG_THUMB_LEVEL || "1", 10));
+      const thumbIdx = Math.min(thumbLevel, message.photo.length - 1);
       if (savedMsg.photo.length > 1) {
-        targetThumbId = savedMsg.photo[1].file_id;
-        if (!thumbSize && savedMsg.photo[1].file_size) thumbSize = savedMsg.photo[1].file_size;
+        targetThumbId = savedMsg.photo[thumbIdx].file_id;
+        if (!thumbSize && savedMsg.photo[thumbIdx].file_size) thumbSize = savedMsg.photo[thumbIdx].file_size;
       }
     } else if (savedMsg.document) {
       targetFileId = savedMsg.document.file_id;
