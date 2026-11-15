@@ -32,7 +32,6 @@ export async function onRequest(context) {
     if (folder === 'true') {
         try {
             params.path = decodeURIComponent(params.path);
-            // 使用队列存储需要处理的文件夹
             const folderQueue = [{
                 path: params.path.split(',').join('/')
             }];
@@ -45,7 +44,6 @@ export async function onRequest(context) {
             while (folderQueue.length > 0) {
                 const currentFolder = folderQueue.shift();
 
-                // 获取指定目录下的所有文件
                 const listUrl = new URL(`${url.origin}/api/manage/list?count=-1&dir=${currentFolder.path}`);
                 const listRequest = new Request(listUrl, {
                     headers: request.headers,
@@ -55,7 +53,6 @@ export async function onRequest(context) {
 
                 const files = listData.files;
 
-                // 处理当前文件夹下的所有文件
                 for (const file of files) {
                     const fileId = file.name;
                     const cdnUrl = `https://${url.hostname}/file/${fileId}`;
@@ -64,7 +61,6 @@ export async function onRequest(context) {
                     const success = !!(result && result.deleted);
                     details.push({ fileId, success, existed: !!result?.existed, error: success ? '' : 'Delete file failed' });
                     if (success) {
-                        // 记录不存在也计入 deleted，由 missing/details 标识。
                         deletedFiles.push(fileId);
                         if (!result.existed) missingFiles.push(fileId);
                     } else {
@@ -72,7 +68,6 @@ export async function onRequest(context) {
                     }
                 }
 
-                // 将子文件夹添加到队列
                 const directories = listData.directories;
                 for (const dir of directories) {
                     folderQueue.push({
@@ -81,7 +76,6 @@ export async function onRequest(context) {
                 }
             }
 
-            // 批量从索引中删除文件
             if (deletedFiles.length > 0) {
                 waitUntil(batchRemoveFilesFromIndex(context, deletedFiles));
             }
@@ -109,7 +103,6 @@ export async function onRequest(context) {
 
     // 单个文件删除处理
     try {
-        // 解码params.path
         params.path = decodeURIComponent(params.path);
         const fileId = params.path.split(',').join('/');
         const cdnUrl = `https://${url.hostname}/file/${fileId}`;
@@ -118,14 +111,12 @@ export async function onRequest(context) {
         if (!result || !result.deleted) {
             throw new Error('Delete file failed');
         } else {
-            // 记录不存在时也可能有残留索引，因此仍需清理。
             waitUntil(removeFileFromIndex(context, fileId));
         }
 
         return new Response(JSON.stringify({
             success: true,
             fileId: fileId,
-            // 请求成功不代表记录曾存在，existed 用于区分这两种情况。
             existed: result.existed
         }), {
             headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -141,47 +132,37 @@ export async function onRequest(context) {
     }
 }
 
-// 按渠道删除存储中的文件对象，不处理数据库记录；返回 false 表示渠道删除失败
-// 有效期清理先删除存储、再按条件删除记录，并据返回值决定是否保留记录重试，因此单独导出
 export async function deleteStoredFile(env, fileId, img) {
-    // 如果是R2渠道的图片，需要删除R2中对应的图片
     if (img.metadata?.Channel === 'CloudflareR2') {
         const R2DataBase = env.img_r2;
         await R2DataBase.delete(fileId);
     }
 
-    // S3 渠道的图片，需要删除S3中对应的图片
     if (img.metadata?.Channel === 'S3') {
         return await deleteS3File(env, img);
     }
 
-    // Discord 渠道的图片，需要删除 Discord 中对应的消息
     if (img.metadata?.Channel === 'Discord') {
         return await deleteDiscordFile(env, img);
     }
 
-    // HuggingFace 渠道的图片，需要删除 HuggingFace 中对应的文件
     if (img.metadata?.Channel === 'HuggingFace') {
         return await deleteHuggingFaceFile(env, img);
     }
 
-    // WebDAV 渠道的图片，需要删除 WebDAV 中对应的文件
     if (img.metadata?.Channel === 'WebDAV') {
         return await deleteWebDAVFile(env, img);
     }
 
-    // R2 删除失败会抛出；Telegram、外链等渠道只删除记录
     return true;
 }
 
 // 删除单个文件的核心函数
 export async function deleteFile(env, fileId, cdnUrl, url) {
     try {
-        // 读取图片信息
         const db = getDatabase(env);
         const img = await db.getWithMetadata(fileId);
 
-        // 如果文件记录不存在，直接返回成功（幂等删除），标记 existed=false 供调用方区分
         if (isMissingRecord(img)) {
             console.warn(`File ${fileId} not found in database, skipping delete`);
             return { deleted: true, existed: false };
@@ -191,21 +172,30 @@ export async function deleteFile(env, fileId, cdnUrl, url) {
             throw new Error('storage channel reported a failed deletion');
         }
 
-        // 删除数据库中的记录
-        // 注意：容量统计现在由索引自动维护，删除文件后索引更新时会自动重新计算
+        // 删除数据库中的主记录
         await db.delete(fileId);
+
+        // 联动删除关联的独立随机缩略图指针记录及缓存
+        const thumbKey = img.metadata?.thumbKey;
+        if (thumbKey) {
+            try {
+                await db.delete(thumbKey);
+                await purgeCFCache(env, `https://${url.hostname}/file/${thumbKey}`);
+            } catch (thumbErr) {
+                console.warn(`Failed to delete paired thumb record ${thumbKey}:`, thumbErr);
+            }
+        }
 
         const expiresAt = getExpiresAt(img.metadata);
         if (expiresAt !== null && typeof db.listExpiredFiles !== 'function') {
             try {
                 await db.delete(buildExpiryMarkerKey(expiresAt, fileId));
             } catch (error) {
-                // 文件已删除；残留标记由后续清理任务重试移除。
                 console.warn('Failed to remove deleted file expiry marker:', error);
             }
         }
 
-        // 清除CDN缓存
+        // 清除主图CDN缓存
         await purgeCFCache(env, cdnUrl);
 
         // 清除 api/randomFileList 等API缓存
@@ -220,7 +210,6 @@ export async function deleteFile(env, fileId, cdnUrl, url) {
     }
 }
 
-// 删除 S3 渠道的图片
 async function deleteS3File(env, img) {
     const db = getDatabase(env);
     const s3Credentials = await resolveS3Credentials(db, env, img.metadata);
@@ -241,7 +230,6 @@ async function deleteS3File(env, img) {
     }
 }
 
-// 删除 Discord 渠道的图片（删除 Discord 消息）
 async function deleteDiscordFile(env, img) {
     const db = getDatabase(env);
     const discordCredentials = await resolveDiscordCredentials(db, env, img.metadata);
@@ -267,8 +255,6 @@ async function deleteDiscordFile(env, img) {
     }
 }
 
-
-// 删除 HuggingFace 渠道的图片
 async function deleteHuggingFaceFile(env, img) {
     const db = getDatabase(env);
     const hfCredentials = await resolveHuggingFaceCredentials(db, env, img.metadata);
@@ -295,8 +281,6 @@ async function deleteHuggingFaceFile(env, img) {
     }
 }
 
-
-// 删除 WebDAV 渠道的图片
 async function deleteWebDAVFile(env, img) {
     const filePath = img.metadata?.WebDAVFilePath;
 
